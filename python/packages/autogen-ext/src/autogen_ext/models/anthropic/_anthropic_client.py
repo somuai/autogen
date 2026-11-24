@@ -150,29 +150,36 @@ def get_mime_type_from_image(image: Image) -> Literal["image/jpeg", "image/png",
         return "image/jpeg"
 
 
-def convert_tool_choice_anthropic(tool_choice: Tool | Literal["auto", "required", "none"]) -> Any:
+def convert_tool_choice_anthropic(
+    tool_choice: Tool | Literal["auto", "required", "none", "any"] | Dict[str, Any],
+) -> Any:
     """Convert tool_choice parameter to Anthropic API format.
 
     Args:
-        tool_choice: A single Tool object to force the model to use, "auto" to let the model choose any available tool, "required" to force tool usage, or "none" to disable tool usage.
+        tool_choice: A single Tool object to force the model to use, "auto" to let the model choose any available tool, "required" to force tool usage, "none" to disable tool usage, or a dict specification.
 
     Returns:
         Anthropic API compatible tool_choice value.
     """
+    if isinstance(tool_choice, dict):
+        return tool_choice
+
     if tool_choice == "none":
         return {"type": "none"}
 
     if tool_choice == "auto":
         return {"type": "auto"}
 
-    if tool_choice == "required":
+    if tool_choice == "required" or tool_choice == "any":
         return {"type": "any"}  # Anthropic uses "any" for required
 
     # Must be a Tool object
     if isinstance(tool_choice, Tool):
         return {"type": "tool", "name": tool_choice.schema["name"]}
     else:
-        raise ValueError(f"tool_choice must be a Tool object, 'auto', 'required', or 'none', got {type(tool_choice)}")
+        raise ValueError(
+            f"tool_choice must be a Tool object, 'auto', 'required', 'none', 'any', or a dict, got {type(tool_choice)}"
+        )
 
 
 @overload
@@ -345,13 +352,19 @@ def convert_tools(tools: Sequence[Tool | ToolSchema]) -> List[ToolParam]:
             else:
                 tool_params["type"] = "object"
 
-        result.append(
-            ToolParam(
-                name=tool_schema["name"],
-                input_schema=tool_params,
-                description=tool_schema.get("description", ""),
-            )
+            # Transfer additionalProperties
+            if "additionalProperties" in params:
+                tool_params["additionalProperties"] = params["additionalProperties"]
+
+        tool_param = ToolParam(
+            name=tool_schema["name"],
+            input_schema=tool_params,
+            description=tool_schema.get("description", ""),
         )
+        if "strict" in tool_schema:
+            tool_param["strict"] = tool_schema["strict"]  # type: ignore[typeddict-unknown-key]
+
+        result.append(tool_param)
 
         # Check if the tool has a valid name
         assert_valid_name(tool_schema["name"])
@@ -554,7 +567,7 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[Tool | ToolSchema] = [],
-        tool_choice: Tool | Literal["auto", "required", "none"] = "auto",
+        tool_choice: Tool | Literal["auto", "required", "none"] | Dict[str, Any] | None = None,
         json_output: Optional[bool | type[BaseModel]] = None,
         extra_create_args: Mapping[str, Any] = {},
         cancellation_token: Optional[CancellationToken] = None,
@@ -562,6 +575,9 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
         # Copy create args and update with extra args
         create_args = self._create_args.copy()
         create_args.update(extra_create_args)
+
+        if tool_choice is None:
+            tool_choice = create_args.get("tool_choice", "auto")
 
         # Check for vision capability if images are present
         if self.model_info["vision"] is False:
@@ -634,7 +650,7 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
             request_args["tools"] = self._last_used_tools
 
         # Process tool_choice parameter
-        if isinstance(tool_choice, Tool):
+        if isinstance(tool_choice, Tool) or (isinstance(tool_choice, dict) and tool_choice.get("type") == "tool"):
             if len(tools) == 0 and not has_tool_results:
                 raise ValueError("tool_choice specified but no tools provided")
 
@@ -651,8 +667,8 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
                 for tool_param in self._last_used_tools:
                     tool_names_available.append(tool_param["name"])
 
-            # tool_choice is a single Tool object
-            tool_name = tool_choice.schema["name"]
+            # tool_choice is a single Tool object or dict with name
+            tool_name = tool_choice.schema["name"] if isinstance(tool_choice, Tool) else tool_choice["name"]
             if tool_name not in tool_names_available:
                 raise ValueError(f"tool_choice references '{tool_name}' but it's not in the available tools")
 
@@ -767,7 +783,7 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[Tool | ToolSchema] = [],
-        tool_choice: Tool | Literal["auto", "required", "none"] = "auto",
+        tool_choice: Tool | Literal["auto", "required", "none"] | Dict[str, Any] | None = None,
         json_output: Optional[bool | type[BaseModel]] = None,
         extra_create_args: Mapping[str, Any] = {},
         cancellation_token: Optional[CancellationToken] = None,
@@ -779,6 +795,9 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
         # Copy create args and update with extra args
         create_args = self._create_args.copy()
         create_args.update(extra_create_args)
+
+        if tool_choice is None:
+            tool_choice = create_args.get("tool_choice", "auto")
 
         # Check for vision capability if images are present
         if self.model_info["vision"] is False:
@@ -853,7 +872,7 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
             request_args["tools"] = self._last_used_tools
 
         # Process tool_choice parameter
-        if isinstance(tool_choice, Tool):
+        if isinstance(tool_choice, Tool) or (isinstance(tool_choice, dict) and tool_choice.get("type") == "tool"):
             if len(tools) == 0 and not has_tool_results:
                 raise ValueError("tool_choice specified but no tools provided")
 
@@ -870,8 +889,8 @@ class BaseAnthropicChatCompletionClient(ChatCompletionClient):
                 for last_used_tool in self._last_used_tools:
                     tool_names_available.append(last_used_tool["name"])
 
-            # tool_choice is a single Tool object
-            tool_name = tool_choice.schema["name"]
+            # tool_choice is a single Tool object or dict with name
+            tool_name = tool_choice.schema["name"] if isinstance(tool_choice, Tool) else tool_choice["name"]
             if tool_name not in tool_names_available:
                 raise ValueError(f"tool_choice references '{tool_name}' but it's not in the available tools")
 

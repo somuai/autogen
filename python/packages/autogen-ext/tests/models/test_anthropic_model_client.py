@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import List, Sequence
+from typing import Any, Dict, List, Sequence, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,13 +17,14 @@ from autogen_core.models import (
     UserMessage,
 )
 from autogen_core.models._types import LLMMessage
-from autogen_core.tools import FunctionTool
+from autogen_core.tools import FunctionTool, ToolSchema
 from autogen_ext.models.anthropic import (
     AnthropicBedrockChatCompletionClient,
     AnthropicChatCompletionClient,
     BaseAnthropicChatCompletionClient,
     BedrockInfo,
 )
+from autogen_ext.models.anthropic._anthropic_client import convert_tools
 
 
 def _pass_function(input: str) -> str:
@@ -185,6 +186,80 @@ async def test_mock_tool_choice_validation_error() -> None:
             tools=[pass_tool, add_tool],
             tool_choice=different_tool,  # This tool is not in the tools list
         )
+
+
+@pytest.mark.asyncio
+async def test_mock_configured_tool_choice_none() -> None:
+    """Test configured tool_choice='none' on client is honored when tools are provided."""
+    mock_client = AsyncMock()
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(type="text", text="No tools called.")]
+    mock_message.usage.input_tokens = 10
+    mock_message.usage.output_tokens = 5
+    mock_client.messages.create.return_value = mock_message
+
+    client = AnthropicChatCompletionClient(
+        model="claude-3-haiku-20240307",
+        api_key="test-key",
+        tool_choice="none",
+    )
+    pass_tool = FunctionTool(_pass_function, description="Process input text", name="process_text")
+    messages: List[LLMMessage] = [UserMessage(content="Hello.", source="user")]
+
+    with patch.object(client, "_client", mock_client):
+        await client.create(messages=messages, tools=[pass_tool])
+
+    mock_client.messages.create.assert_called_once()
+    call_args = mock_client.messages.create.call_args
+    assert "tool_choice" in call_args.kwargs
+    assert call_args.kwargs["tool_choice"] == {"type": "none"}
+
+
+@pytest.mark.asyncio
+async def test_mock_configured_tool_choice_dict() -> None:
+    """Test configured tool_choice dict with disable_parallel_tool_use."""
+    mock_client = AsyncMock()
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(type="text", text="Single tool.")]
+    mock_message.usage.input_tokens = 10
+    mock_message.usage.output_tokens = 5
+    mock_client.messages.create.return_value = mock_message
+
+    tool_choice_cfg = {"type": "auto", "disable_parallel_tool_use": True}
+    client = AnthropicChatCompletionClient(
+        model="claude-3-haiku-20240307",
+        api_key="test-key",
+        tool_choice=tool_choice_cfg,
+    )
+    pass_tool = FunctionTool(_pass_function, description="Process input text", name="process_text")
+    messages: List[LLMMessage] = [UserMessage(content="Hello.", source="user")]
+
+    with patch.object(client, "_client", mock_client):
+        await client.create(messages=messages, tools=[pass_tool])
+
+    mock_client.messages.create.assert_called_once()
+    call_args = mock_client.messages.create.call_args
+    assert call_args.kwargs["tool_choice"] == tool_choice_cfg
+
+
+def test_mock_convert_tools_additional_properties_and_strict() -> None:
+    """Test convert_tools preserves additionalProperties in parameters and strict in tool_schema."""
+    tool_schema: ToolSchema = {
+        "name": "structured_tool",
+        "description": "Structured output test tool",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+    converted = convert_tools([tool_schema])
+    assert len(converted) == 1
+    input_schema = cast(Dict[str, Any], converted[0]["input_schema"])
+    assert input_schema["additionalProperties"] is False
+    assert cast(Dict[str, Any], converted[0]).get("strict") is True
 
 
 @pytest.mark.asyncio
