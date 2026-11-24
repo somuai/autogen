@@ -5,7 +5,7 @@ from typing import Annotated, List
 
 import pytest
 from autogen_core import CancellationToken
-from autogen_core._function_utils import get_typed_signature
+from autogen_core._function_utils import get_function_schema, get_typed_signature
 from autogen_core.tools import BaseTool, FunctionTool
 from autogen_core.tools._base import ToolSchema
 from pydantic import BaseModel, Field, ValidationError, model_serializer
@@ -308,6 +308,34 @@ def test_get_typed_signature_param_annotated() -> None:
     assert isinstance(sig, inspect.Signature)
     assert len(sig.parameters) == 1
     assert sig.parameters["arg"].annotation == Annotated[str, "An arg"]
+
+
+def test_get_typed_signature_unannotated_param() -> None:
+    def my_function(a: int, b) -> None:
+        return None
+
+    sig = get_typed_signature(my_function)
+    assert isinstance(sig, inspect.Signature)
+    assert sig.parameters["a"].annotation is int
+    assert sig.parameters["b"].annotation is inspect.Parameter.empty
+
+
+def test_get_function_schema_unannotated_raises_type_error() -> None:
+    def my_function(a: int, b) -> None:
+        return None
+
+    with pytest.raises(TypeError, match="All parameters of the function 'my_function' without default values must be annotated"):
+        get_function_schema(my_function, description="Test unannotated parameter")
+
+
+def test_get_function_schema_partial_function() -> None:
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    p = partial(add, 1)
+    schema = get_function_schema(p, description="Add one to b")
+    assert schema["function"]["name"] == "add"
+    assert "b" in schema["function"]["parameters"]["properties"]
 
 
 def test_func_tool() -> None:
